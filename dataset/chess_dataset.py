@@ -58,12 +58,14 @@ class ChessMoveTokenizer:
         return self.id_to_move.get(idx, None)
 
 class FastChessDataset(IterableDataset):
-    def __init__(self, file_path, num_bins=128, skip=0, limit=None):
+    def __init__(self, file_path, num_bins=128, skip=0, limit=None, rank=0, world_size=1):
         self.file_path = file_path
         self.tokenizer = ChessMoveTokenizer()
         self.num_bins = num_bins
         self.skip = skip
         self.limit = limit
+        self.rank = rank
+        self.world_size = world_size
         # Pre-calculate Gaussian x-axis
         self.bin_x = np.arange(num_bins, dtype=np.float32)
 
@@ -84,6 +86,7 @@ class FastChessDataset(IterableDataset):
             return
 
         count = 0
+        line_idx = 0
         skipped = 0
         
         dctx = zstd.ZstdDecompressor()
@@ -91,6 +94,13 @@ class FastChessDataset(IterableDataset):
             with dctx.stream_reader(f) as reader:
                 text_stream = io.TextIOWrapper(reader, encoding='utf-8')
                 for line in text_stream:
+                    current_line = line_idx
+                    line_idx += 1
+                    
+                    # Sharding
+                    if current_line % self.world_size != self.rank:
+                        continue
+
                     # Skip logic
                     if skipped < self.skip:
                         skipped += 1
