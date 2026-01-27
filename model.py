@@ -149,7 +149,8 @@ class ChessTransformer(nn.Module):
         
         # Counter Tokens
         # [B, 2] -> [B, 2, 1] -> [B, 2, D]
-        x_count = self.counter_proj(counters.unsqueeze(-1))
+        # Scaling counters by 100.0 for stability as per user request
+        x_count = self.counter_proj((counters / 100.0).unsqueeze(-1))
         x_count = x_count + self.counter_pos_emb
         
         # Scratchpad Tokens

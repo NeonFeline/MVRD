@@ -19,6 +19,9 @@ dependencies = [
     "zstandard>=0.25.0",
 ]
 
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
 [[tool.uv.index]]
 name = "pytorch"
 url = "https://download.pytorch.org/whl/cu130"

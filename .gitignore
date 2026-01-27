@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Slurm scripts
+*.slurm
+logs
 # C extensions
 *.so
 

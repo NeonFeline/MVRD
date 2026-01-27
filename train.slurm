@@ -1,45 +1,51 @@
 #!/bin/bash
-#SBATCH --job-name=mvrce-train
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
+#SBATCH --job-name=mvrd-train
 #SBATCH --partition=hgx
-#SBATCH --time=48:00:00
-#SBATCH -w hgx2
-# Create logs directory
-mkdir -p logs
+#SBATCH --nodelist=hgx1
+#SBATCH --nodes=1
+#SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=16
+#SBATCH --time=72:00:00
+#SBATCH --output=logs/%x-%j.out
+#SBATCH --error=logs/%x-%j.err
 
-# Environment Setup
-echo "Syncing dependencies..."
-uv sync
+# Activate virtual environment
+cd /raid/ai164201/MVRD
 
-# Set distributed variables for torchrun
+# Weights & Biases API Key
+export WANDB_API_KEY=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
+
+# Environment Variables
+export OMP_NUM_THREADS=8
+export MKL_NUM_THREADS=8
+export LOCAL_RANK=$SLURM_LOCALID
+export WORLD_SIZE=$SLURM_NTASKS
+export RANK=$SLURM_PROCID
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 export MASTER_PORT=29500
 
-echo "Starting training on $SLURM_JOB_NODELIST"
-echo "Job ID: $SLURM_JOB_ID"
+export NCCL_DEBUG=INFO
+export NCCL_ASYNC_ERROR_HANDLING=1
 
-# Run with torchrun
-# Using 'uv run' to ensure we use the project environment
-# Batch size 2048 per GPU (Total 8192)
+export NCCL_P2P_LEVEL=NVL
+export NCCL_IB_DISABLE=1
+export NCCL_SOCKET_IFNAME=lo
+
+
+
+echo "Starting training on node $SLURM_JOB_NODELIST with $SLURM_GPUS_PER_NODE GPUs."
+
 uv run torchrun \
-    --nnodes=1 \
-    --nproc_per_node=4 \
+    --nnodes=$SLURM_JOB_NUM_NODES \
+    --nproc_per_node=$SLURM_GPUS_PER_NODE \
     --rdzv_id=$SLURM_JOB_ID \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     train_dist.py \
-    --data_path dataset/data \
-    --batch_size 2048 \
-    --embed_dim 512 \
-    --depth 24 \
-    --num_heads 8 \
-    --ff_dim 2048 \
-    --save_dir checkpoints_a100 \
-    --log_interval 50 \
-    --save_interval 2000 \
-    --max_steps 500000
+    --epochs 3 \
+    --local_batch_size 1024 \
+    --dataset_length 342059879 \
+    --save_dir checkpoints_mvrd \
+    --run_name "run_mvrd" \
+    --workers 8

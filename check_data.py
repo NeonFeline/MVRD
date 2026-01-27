@@ -34,8 +34,6 @@ def check_target_legality():
             vocab_idx = indices[1][0].item()
             print(f"  Sample {b_idx}, Token {vocab_idx}")
             
-            # Can we see the FEN? No easily available here without modifying dataset yield.
-            
         total += batch['move_target'].shape[0]
         
         if i > 20: break

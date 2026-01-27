@@ -85,6 +85,18 @@ class FastChessDataset(IterableDataset):
         if not os.path.exists(self.file_path):
             return
 
+        # Handle Worker Sharding
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is None:
+            # Single process loading (or main process)
+            global_rank = self.rank
+            global_world_size = self.world_size
+        else:
+            # Multi-process loading via DataLoader num_workers
+            # We treat each worker as a separate entity in the global pool
+            global_rank = self.rank * worker_info.num_workers + worker_info.id
+            global_world_size = self.world_size * worker_info.num_workers
+
         count = 0
         line_idx = 0
         skipped = 0
@@ -92,13 +104,18 @@ class FastChessDataset(IterableDataset):
         dctx = zstd.ZstdDecompressor()
         with open(self.file_path, 'rb') as f:
             with dctx.stream_reader(f) as reader:
-                text_stream = io.TextIOWrapper(reader, encoding='utf-8')
-                for line in text_stream:
+                # Wrap in BufferedReader for efficient readline
+                buffered_reader = io.BufferedReader(reader)
+                while True:
+                    line_bytes = buffered_reader.readline()
+                    if not line_bytes:
+                        break
+
                     current_line = line_idx
                     line_idx += 1
                     
                     # Sharding
-                    if current_line % self.world_size != self.rank:
+                    if current_line % global_world_size != global_rank:
                         continue
 
                     # Skip logic
@@ -111,8 +128,9 @@ class FastChessDataset(IterableDataset):
                         break
 
                     try:
+                        line = line_bytes.decode('utf-8')
                         data = orjson.loads(line)
-                    except orjson.JSONDecodeError:
+                    except (UnicodeDecodeError, orjson.JSONDecodeError):
                         continue
                         
                     fen = data.get('fen')
@@ -163,8 +181,11 @@ class FastChessDataset(IterableDataset):
 
                     # 2. Legal Mask
                     mask = np.zeros(self.tokenizer.vocab_size, dtype=np.float32)
+                    legal_moves_set = set()
                     for m in board.legal_moves:
-                        idx = self.tokenizer.encode(m.uci())
+                        uci = m.uci()
+                        legal_moves_set.add(uci)
+                        idx = self.tokenizer.encode(uci)
                         if idx != -1: mask[idx] = 1.0
 
                     # 3. Targets
@@ -172,7 +193,20 @@ class FastChessDataset(IterableDataset):
                     move_line = pv.get('line', '')
                     move_idx = -1
                     if move_line:
-                        move_idx = self.tokenizer.encode(move_line.split()[0])
+                        raw_move = move_line.split()[0]
+                        
+                        # Fix for dataset using e1h1 for O-O etc.
+                        # Standard UCI uses e1g1 for O-O.
+                        if raw_move not in legal_moves_set:
+                            # Map King-Rook capture notation to King-Target notation
+                            # White
+                            if raw_move == 'e1h1' and 'e1g1' in legal_moves_set: raw_move = 'e1g1'
+                            elif raw_move == 'e1a1' and 'e1c1' in legal_moves_set: raw_move = 'e1c1'
+                            # Black
+                            elif raw_move == 'e8h8' and 'e8g8' in legal_moves_set: raw_move = 'e8g8'
+                            elif raw_move == 'e8a8' and 'e8c8' in legal_moves_set: raw_move = 'e8c8'
+                            
+                        move_idx = self.tokenizer.encode(raw_move)
                     
                     if move_idx != -1: 
                         move_target[move_idx] = 1.0
