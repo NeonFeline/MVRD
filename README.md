@@ -1,28 +1,29 @@
-  __  ____      _______  _____  
+<pre>
+__  ____      _______  _____  
  |  \/  \ \    / /  __ \|  __ \ 
  | \  / |\ \  / /| |__) | |  | |
  | |\/| | \ \/ / |  _  /| |  | |
  | |  | |  \  /  | | \ \| |__| |
  |_|  |_|   \/   |_|  \_\_____/ 
-                                
-                                
-### MVRD
-## Maciek's Very Romantic Dream
-# Transformer based chess engine with auxiliary thinking tokens
+</pre>
 
-Provided here is the script for MVRD
-Details:
-- Transformer Encoder
-- 24 layers
-- 81 tokens (with 64 board tokens, 1 output token, 8 auxiliary thinking tokens)
-- hidden size of 512
-- SwiGLU size of 2024
-- RMSNorm normalization
-- Policy head
-- Value Head
+### MVRD: Maciek's Very Romantic Dream
+"We can only see a short distance ahead, but we can see plenty there that needs to be done." 
+— Alan Turing
 
-Trained on lichess Stockfish Evaluation dataset
+[PROJECT SCOPE]
+A Transformer-based chess engine designed to explore the intersection of 
+generative architecture and strategic intuition. 
 
+[ARCHITECTURAL SPECIFICATIONS]
+- Type:         Transformer Encoder (Pure Attention)
+- Depth:        24 Layers
+- Context:      81 Tokens 
+                (64 Board | 8 Auxiliary Thinking | 1 Output/Action)
+- Latent Dim:   512 (Hidden Size)
+- MLP/Foresight: 2024 (SwiGLU)
+- Normalization: RMSNorm
+- Dual Head:    Policy (Move Prediction) & Value (Position Evaluation)
 
-
-"We can only see a short distance ahead, but we can see plenty there that needs to be done." - Alan Turing
+[TRAINING DATA]
+- Dataset:      Lichess Stockfish Evaluation (Distillation Learning)
