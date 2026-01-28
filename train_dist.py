@@ -3,6 +3,7 @@ import argparse
 import glob
 import random
 import math
+import yaml
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -42,7 +43,7 @@ def calculate_topk_accuracy(logits, targets, k=1):
     correct = torch.eq(topk_indices, target_indices.unsqueeze(1)).any(dim=1)
     return correct.float().mean().item()
 
-def train(args):
+def train(config):
     setup()
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -50,25 +51,28 @@ def train(args):
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
 
+    train_cfg = config['training']
+    model_cfg = config['model']
+
     # Seed
-    seed = args.seed + rank
+    seed = train_cfg.get('seed', 42) + rank
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
     # Logging
     if rank == 0:
-        if not os.path.exists(args.save_dir):
-            os.makedirs(args.save_dir, exist_ok=True)
+        if not os.path.exists(train_cfg['save_dir']):
+            os.makedirs(train_cfg['save_dir'], exist_ok=True)
         # Check for wandb API key or login
         if "WANDB_API_KEY" in os.environ:
-             wandb.init(project=args.project, name=args.run_name, config=args)
+             wandb.init(project=train_cfg['project'], name=train_cfg['run_name'], config=config)
         else:
              print("WANDB_API_KEY not found. WandB logging might fail or run in offline mode.")
-             wandb.init(project=args.project, name=args.run_name, config=args, mode="disabled")
+             wandb.init(project=train_cfg['project'], name=train_cfg['run_name'], config=config, mode="disabled")
 
     # Data Finding
-    data_path = args.data_path
+    data_path = train_cfg['data_path']
     if os.path.isdir(data_path):
         candidates = glob.glob(os.path.join(data_path, "*.jsonl.zst"))
         if candidates:
@@ -91,8 +95,8 @@ def train(args):
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.local_batch_size,
-        num_workers=args.workers,
+        batch_size=train_cfg['local_batch_size'],
+        num_workers=train_cfg['workers'],
         pin_memory=True
     )
     
@@ -103,12 +107,12 @@ def train(args):
         world_size=world_size,
         skip=val_samples_per_rank # Skip the validation chunk
     )
-    train_dataset = StreamingShuffleDataset(train_dataset, buffer_size=args.buffer_size)
+    train_dataset = StreamingShuffleDataset(train_dataset, buffer_size=train_cfg['buffer_size'])
     
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=args.local_batch_size, 
-        num_workers=args.workers, 
+        batch_size=train_cfg['local_batch_size'], 
+        num_workers=train_cfg['workers'], 
         pin_memory=True
     )
     
@@ -122,10 +126,13 @@ def train(args):
 
     # Model
     model = ChessTransformer(
-        depth=args.depth,
-        embed_dim=args.embed_dim,
-        num_heads=args.num_heads,
-        ff_dim=args.ff_dim
+        vocab_size=model_cfg['vocab_size'],
+        hidden_size=model_cfg['hidden_size'],
+        depth=model_cfg['depth'],
+        num_heads=model_cfg['num_heads'],
+        ff_dim=model_cfg['ff_dim'],
+        num_eval_bins=model_cfg['num_eval_bins'],
+        num_scratchpad=model_cfg['num_scratchpad']
     ).to(device)
 
     if rank == 0:
@@ -147,11 +154,11 @@ def train(args):
         else:
             adam_no_decay.append(p)
             
-    optimizer_muon = optim.Muon(muon_params, lr=args.muon_lr, weight_decay=0.1, momentum=0.95)
+    optimizer_muon = optim.Muon(muon_params, lr=train_cfg['muon_learning_rate'], weight_decay=train_cfg['muon_weight_decay'], momentum=0.95)
     optimizer_adam = optim.AdamW([
-        {'params': adam_decay, 'weight_decay': args.wd},
+        {'params': adam_decay, 'weight_decay': train_cfg['weight_decay']},
         {'params': adam_no_decay, 'weight_decay': 0.0}
-    ], lr=args.adam_lr)
+    ], lr=train_cfg['adam_learning_rate'])
 
     criterion = ChessLoss()
 
@@ -160,37 +167,33 @@ def train(args):
     
     # Calculate total steps for scheduler
     val_count = 50000
-    train_count = args.dataset_length - val_count
+    train_count = train_cfg['dataset_size'] - val_count
     if train_count <= 0:
-        raise ValueError(f"Dataset length {args.dataset_length} is too small for validation set of {val_count}")
+        raise ValueError(f"Dataset length {train_cfg['dataset_size']} is too small for validation set of {val_count}")
 
-    global_batch_size = args.local_batch_size * world_size
+    global_batch_size = train_cfg['local_batch_size'] * world_size
     steps_per_epoch = train_count // global_batch_size
-    total_steps = args.epochs * steps_per_epoch
+    total_steps = train_cfg['epochs'] * steps_per_epoch
     
     if rank == 0: 
-        print(f"Starting training for {args.epochs} epochs.")
-        print(f"Global Batch Size: {global_batch_size} ({args.local_batch_size} per GPU * {world_size} GPUs)")
+        print(f"Starting training for {train_cfg['epochs']} epochs.")
+        print(f"Global Batch Size: {global_batch_size} ({train_cfg['local_batch_size']} per GPU * {world_size} GPUs)")
         print(f"Training samples: {train_count} | Steps per epoch: {steps_per_epoch}")
         print(f"Scheduler set for {total_steps} total steps.")
     
     # Metrics accumulator
     metrics_acc = {'loss': 0.0, 'acc_1': 0.0, 'acc_3': 0.0, 'acc_5': 0.0}
     
-    for epoch in range(args.epochs):
-        if rank == 0: print(f"--- Epoch {epoch+1}/{args.epochs} ---")
-        
-        # In DDP with IterableDataset, the sharding is deterministic in FastChessDataset (line % world_size).
-        # StreamingShuffleDataset provides local randomness.
-        # We just iterate the dataloader to go through the full dataset.
+    for epoch in range(train_cfg['epochs']):
+        if rank == 0: print(f"--- Epoch {epoch+1}/{train_cfg['epochs']} ---")
         
         for batch in train_loader:
             # Move to device
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             
             # Calculate Learning Rates
-            lr_m = get_lr_schedule(step, total_steps, args.muon_lr, args.warmup_pct, args.decay_pct)
-            lr_a = get_lr_schedule(step, total_steps, args.adam_lr, args.warmup_pct, args.decay_pct)
+            lr_m = get_lr_schedule(step, total_steps, train_cfg['muon_learning_rate'], train_cfg['warmup_percentage'], train_cfg['decay_percentage'])
+            lr_a = get_lr_schedule(step, total_steps, train_cfg['adam_learning_rate'], train_cfg['warmup_percentage'], train_cfg['decay_percentage'])
             
             for pg in optimizer_muon.param_groups: pg['lr'] = lr_m
             for pg in optimizer_adam.param_groups: pg['lr'] = lr_a
@@ -229,11 +232,11 @@ def train(args):
             step += 1
             
             # --- Logging & Validation ---
-            if step % args.log_interval == 0:
+            if step % train_cfg['log_interval'] == 0:
                 # 1. Training Logs
                 if rank == 0:
                     # Average over interval
-                    div = args.log_interval
+                    div = train_cfg['log_interval']
                     log_dict = {
                         "train/loss": metrics_acc['loss'] / div,
                         "train/acc_top1": metrics_acc['acc_1'] / div,
@@ -305,12 +308,12 @@ def train(args):
                 
                 model.train()
 
-            if rank == 0 and step % args.save_interval == 0:
-                ckpt_path = os.path.join(args.save_dir, f"checkpoint_{step}.pt")
+            if rank == 0 and step % train_cfg['save_interval'] == 0:
+                ckpt_path = os.path.join(train_cfg['save_dir'], f"checkpoint_{step}.pt")
                 torch.save(model.module.state_dict(), ckpt_path)
 
     if rank == 0:
-        torch.save(model.module.state_dict(), os.path.join(args.save_dir, "final.pt"))
+        torch.save(model.module.state_dict(), os.path.join(train_cfg['save_dir'], "final.pt"))
         if wandb.run:
             wandb.finish()
 
@@ -318,38 +321,10 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, default="dataset/data")
-    parser.add_argument("--save_dir", type=str, default="checkpoints")
-    parser.add_argument("--project", type=str, default="mvrce-chess")
-    parser.add_argument("--run_name", type=str, default="run_A100_muon")
-    
-    # Training Params
-    parser.add_argument("--local_batch_size", type=int, default=128, help="Batch size per GPU")
-    parser.add_argument("--workers", type=int, default=4, help="Number of data loading workers per GPU")
-    parser.add_argument("--adam_lr", type=float, default=3e-4)
-    parser.add_argument("--muon_lr", type=float, default=0.02)
-    parser.add_argument("--wd", type=float, default=0.01)
-    
-    parser.add_argument("--epochs", type=int, default=3, help="Number of epochs to train")
-    parser.add_argument("--dataset_length", type=int, default=10000000, help="Total number of samples in the dataset")
-    
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--buffer_size", type=int, default=50000)
-    
-    # Scheduling
-    parser.add_argument("--warmup_pct", type=float, default=0.05)
-    parser.add_argument("--decay_pct", type=float, default=0.15)
-    
-    # Model Params
-    parser.add_argument("--embed_dim", type=int, default=512)
-    parser.add_argument("--depth", type=int, default=12)
-    parser.add_argument("--num_heads", type=int, default=8)
-    parser.add_argument("--ff_dim", type=int, default=2048)
-    
-    # Logging
-    parser.add_argument("--log_interval", type=int, default=10)
-    parser.add_argument("--save_interval", type=int, default=5000)
-    
+    parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML config file")
     args = parser.parse_args()
     
-    train(args)
+    with open(args.config, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    train(config)

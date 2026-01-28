@@ -34,66 +34,66 @@ class ChessTransformer(nn.Module):
     def __init__(
         self, 
         vocab_size=4544, # Move vocabulary
-        embed_dim=512, 
+        hidden_size=768, 
         depth=24, 
-        num_heads=8, 
+        num_heads=12, 
         ff_dim=2048,
         num_eval_bins=128,
         num_scratchpad=8
     ):
         super().__init__()
-        self.embed_dim = embed_dim
+        self.hidden_size = hidden_size
         self.depth = depth
         self.num_scratchpad = num_scratchpad
         
         # --- Embeddings ---
         # 1. Piece Embedding: 0=Empty, 1-6=White, 7-12=Black (13 total)
-        self.piece_embedding = nn.Embedding(13, embed_dim)
+        self.piece_embedding = nn.Embedding(13, hidden_size)
         
         # 2. Positional Embedding: 64 squares (Learned)
-        self.pos_embedding = nn.Parameter(torch.randn(1, 64, embed_dim) * 0.02)
+        self.pos_embedding = nn.Parameter(torch.randn(1, 64, hidden_size) * 0.02)
         
         # 3. Auxiliary Tokens
         # Turn: 0 or 1
-        self.turn_embedding = nn.Embedding(2, embed_dim)
+        self.turn_embedding = nn.Embedding(2, hidden_size)
         
         # Castling: 0 or 1 (We process 4 rights as 4 tokens)
         # Shared embedding for all 4 positions
-        self.castling_embedding = nn.Embedding(2, embed_dim)
+        self.castling_embedding = nn.Embedding(2, hidden_size)
         # Positional embedding for the 4 castling tokens so the model knows which is which
-        self.castling_pos_emb = nn.Parameter(torch.randn(1, 4, embed_dim) * 0.02)
+        self.castling_pos_emb = nn.Parameter(torch.randn(1, 4, hidden_size) * 0.02)
         
         # En Passant: 0-64
-        self.ep_embedding = nn.Embedding(65, embed_dim)
+        self.ep_embedding = nn.Embedding(65, hidden_size)
         
         # Counters: Scalar -> Vector
-        self.counter_proj = nn.Linear(1, embed_dim)
+        self.counter_proj = nn.Linear(1, hidden_size)
         # Learned positional tags for [Halfmove, Fullmove]
-        self.counter_pos_emb = nn.Parameter(torch.randn(1, 2, embed_dim) * 0.02)
+        self.counter_pos_emb = nn.Parameter(torch.randn(1, 2, hidden_size) * 0.02)
         
         # 4. Scratchpad Tokens (Learned Constants)
-        self.scratchpad = nn.Parameter(torch.randn(1, num_scratchpad, embed_dim) * 0.02)
+        self.scratchpad = nn.Parameter(torch.randn(1, num_scratchpad, hidden_size) * 0.02)
         
         # 5. Output Token (Dedicated CLS token)
-        self.output_token = nn.Parameter(torch.randn(1, 1, embed_dim) * 0.02)
+        self.output_token = nn.Parameter(torch.randn(1, 1, hidden_size) * 0.02)
         
         # --- Transformer Encoder ---
         self.layers = nn.ModuleList([
-            TransformerBlock(embed_dim, num_heads, ff_dim)
+            TransformerBlock(hidden_size, num_heads, ff_dim)
             for _ in range(depth)
         ])
         
-        self.final_norm = RMSNorm(embed_dim)
+        self.final_norm = RMSNorm(hidden_size)
         
         # --- Heads ---
         # 1. Policy Head (Move Prediction)
-        self.policy_head = nn.Linear(embed_dim, vocab_size, bias=False)
+        self.policy_head = nn.Linear(hidden_size, vocab_size, bias=False)
         
         # 2. Value Head (CP Distribution)
-        self.value_head = nn.Linear(embed_dim, num_eval_bins, bias=False)
+        self.value_head = nn.Linear(hidden_size, num_eval_bins, bias=False)
         
         # 3. Mate Head (Win probability / Closeness)
-        self.mate_head = nn.Linear(embed_dim, 1, bias=False)
+        self.mate_head = nn.Linear(hidden_size, 1, bias=False)
         
         # --- Initialization ---
         self.apply(self._init_weights)
