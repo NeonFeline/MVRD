@@ -19,12 +19,14 @@ def dummy_batch():
         'move_target': torch.nn.functional.one_hot(torch.randint(0, vocab_size, (B,)), vocab_size).float(),
         'legal_mask': torch.ones((B, vocab_size), dtype=torch.float), # All legal for simplicity
         'eval_target': torch.softmax(torch.randn(B, 128), dim=1),
-        'mate_target': torch.rand((B, 1)) * 2 - 1 # [-1, 1]
+        'mate_target': torch.rand((B, 1)) * 2 - 1, # [-1, 1]
+        'score_scalar': torch.rand((B, 1)) * 2 - 1 # [-1, 1]
     }
 
 def test_model_forward(dummy_batch):
     """Verifies that the model accepts the batch and produces correct output shapes."""
-    model = ChessTransformer(depth=2, embed_dim=64) # Small model for speed
+    # num_heads=8 to be divisible by hidden_size=64
+    model = ChessTransformer(depth=2, hidden_size=64, num_heads=8) 
     
     outputs = model(dummy_batch)
     
@@ -33,19 +35,22 @@ def test_model_forward(dummy_batch):
     
     assert 'policy' in outputs
     assert 'value' in outputs
+    assert 'value_scalar' in outputs
     assert 'mate' in outputs
     
     assert outputs['policy'].shape == (B, vocab_size)
     assert outputs['value'].shape == (B, 128)
+    assert outputs['value_scalar'].shape == (B, 1)
     assert outputs['mate'].shape == (B, 1)
     
     # Check for NaNs
     assert not torch.isnan(outputs['policy']).any()
     assert not torch.isnan(outputs['value']).any()
+    assert not torch.isnan(outputs['value_scalar']).any()
 
 def test_loss_function_computation(dummy_batch):
     """Verifies that the loss function calculates scalar losses correctly."""
-    model = ChessTransformer(depth=2, embed_dim=64)
+    model = ChessTransformer(depth=2, hidden_size=64, num_heads=8)
     criterion = ChessLoss()
     
     outputs = model(dummy_batch)
@@ -57,20 +62,18 @@ def test_loss_function_computation(dummy_batch):
     
     assert 'policy' in metrics
     assert 'value' in metrics
+    assert 'value_scalar' in metrics
     assert 'mate' in metrics
     assert 'total' in metrics # Should match return
     
     assert metrics['policy'] > 0
     assert metrics['value'] > 0 
+    assert metrics['value_scalar'] >= 0
     assert metrics['mate'] >= 0
 
 def test_loss_masking_mechanism():
     """
     Verifies that the policy loss correctly ignores illegal moves.
-    We create a scenario where the model predicts an illegal move with high confidence,
-    but the mask should prevent it from affecting the loss (if it wasn't the target).
-    Wait, masking prevents *selection*, but for loss, we want to ensure target is valid.
-    Specifically, we check that `legal_mask` modification works.
     """
     B = 2
     vocab = 10
@@ -80,7 +83,8 @@ def test_loss_masking_mechanism():
         'move_target': torch.zeros((B, vocab)),
         'legal_mask': torch.zeros((B, vocab)),
         'eval_target': torch.softmax(torch.randn(B, 128), dim=1), # Valid prob dist
-        'mate_target': torch.tanh(torch.randn(B, 1)) # Valid range [-1, 1]
+        'mate_target': torch.tanh(torch.randn(B, 1)), # Valid range [-1, 1]
+        'score_scalar': torch.tanh(torch.randn(B, 1))
     }
     
     # Set target to index 5
@@ -93,13 +97,12 @@ def test_loss_masking_mechanism():
     outputs = {
         'policy': torch.randn(B, vocab),
         'value': torch.randn(B, 128),
+        'value_scalar': torch.randn(B, 1),
         'mate': torch.randn(B, 1)
     }
     
     criterion = ChessLoss()
     
-    # This should NOT crash or produce Nan/Inf because of the safety patch 
-    # `legal_mask = torch.max(legal_mask, target_move_onehot)`
     loss, _ = criterion(outputs, batch)
     
     assert not torch.isnan(loss)
@@ -107,7 +110,7 @@ def test_loss_masking_mechanism():
 
 def test_loss_gradients(dummy_batch):
     """Verifies that gradients flow back to the model."""
-    model = ChessTransformer(depth=2, embed_dim=64)
+    model = ChessTransformer(depth=2, hidden_size=64, num_heads=8)
     criterion = ChessLoss()
     
     outputs = model(dummy_batch)
@@ -116,5 +119,12 @@ def test_loss_gradients(dummy_batch):
     loss.backward()
     
     # Check if weights have gradients
+    # Check Policy Head (Attention Pool)
     assert model.policy_head.weight.grad is not None
+    assert model.policy_query.grad is not None
+    
+    # Check Value Scalar Head
+    assert model.value_scalar_head.weight.grad is not None
+    
+    # Check Embeddings
     assert model.piece_embedding.weight.grad is not None

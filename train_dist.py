@@ -263,7 +263,7 @@ def train(config):
             # 2. Validation (Every 200 steps)
             if step % 200 == 0:
                 model.eval()
-                val_metrics = {'loss': 0.0, 'acc_1': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 'mate_loss': 0.0}
+                val_metrics = {'loss': 0.0, 'acc_1': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0, 'value_scalar_loss': 0.0, 'mate_loss': 0.0}
                 val_steps = 50  # Validate on 50 batches (~6400 samples with bs=128)
                 
                 with torch.no_grad():
@@ -288,6 +288,7 @@ def train(config):
                         val_metrics['acc_1'] += val_acc1
                         val_metrics['policy_loss'] += val_losses['policy'].item()
                         val_metrics['value_loss'] += val_losses['value'].item()
+                        val_metrics['value_scalar_loss'] += val_losses['value_scalar'].item()
                         val_metrics['mate_loss'] += val_losses['mate'].item()
 
                 # Average metrics
@@ -302,6 +303,7 @@ def train(config):
                             "val/acc_top1": val_metrics['acc_1'],
                             "val/policy_loss": val_metrics['policy_loss'],
                             "val/value_loss": val_metrics['value_loss'],
+                            "val/value_scalar_loss": val_metrics['value_scalar_loss'],
                             "val/mate_loss": val_metrics['mate_loss'],
                             "step": step
                         })

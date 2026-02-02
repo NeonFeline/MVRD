@@ -220,6 +220,15 @@ class FastChessDataset(IterableDataset):
                     if mate_score is not None and mate_score > 0:
                         mate_val = 1.0 / (1.0 + 0.1 * (mate_score - 1))
                     
+                    # Scalar Score Target
+                    cp = pv.get('cp')
+                    raw_target = 0.0
+                    if mate_score is not None:
+                        raw_target = 1500.0 if mate_score > 0 else -1500.0
+                    else:
+                        raw_target = float(cp or 0)
+                    score_scalar = np.clip(raw_target, -1500, 1500) / 1500.0
+
                     yield {
                         'board': torch.from_numpy(board_tensor),
                         'castling': torch.from_numpy(castling),
@@ -228,8 +237,9 @@ class FastChessDataset(IterableDataset):
                         'turn': torch.from_numpy(turn),
                         'legal_mask': torch.from_numpy(mask),
                         'move_target': torch.from_numpy(move_target),
-                        'eval_target': torch.from_numpy(self._create_eval_dist(pv.get('cp'), mate_score)),
-                        'mate_target': torch.tensor([mate_val], dtype=torch.float32)
+                        'eval_target': torch.from_numpy(self._create_eval_dist(cp, mate_score)),
+                        'mate_target': torch.tensor([mate_val], dtype=torch.float32),
+                        'score_scalar': torch.tensor([score_scalar], dtype=torch.float32)
                     }
                     
                     count += 1

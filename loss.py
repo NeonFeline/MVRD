@@ -3,10 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ChessLoss(nn.Module):
-    def __init__(self, policy_weight=1.0, value_weight=1.0, mate_weight=1.0):
+    def __init__(self, policy_weight=1.0, value_weight=1.0, value_scalar_weight=1.0, mate_weight=1.0):
         super().__init__()
         self.policy_weight = policy_weight
         self.value_weight = value_weight
+        self.value_scalar_weight = value_scalar_weight
         self.mate_weight = mate_weight
         
         # Standard losses
@@ -16,7 +17,7 @@ class ChessLoss(nn.Module):
     def forward(self, outputs, batch):
         """
         Args:
-            outputs (dict): {'policy': logits, 'value': logits, 'mate': scalar}
+            outputs (dict): {'policy': logits, 'value': logits, 'value_scalar': scalar, 'mate': scalar}
             batch (dict): Batch data from FastChessDataset
         """
         losses = {}
@@ -54,7 +55,20 @@ class ChessLoss(nn.Module):
         value_loss = self.kl_loss(value_log_probs, value_target)
         losses['value'] = value_loss
         
-        # 3. Mate Loss (MSE)
+        # 3. Value Scalar Loss (MSE)
+        val_scalar_pred = outputs['value_scalar'] # [B, 1]
+        
+        # Check if score_scalar is in batch (backward compatibility/safety)
+        if 'score_scalar' in batch:
+            val_scalar_target = batch['score_scalar'] # [B, 1]
+            val_scalar_loss = self.mse_loss(val_scalar_pred, val_scalar_target)
+        else:
+            # Fallback if dataset not updated (shouldn't happen in this flow)
+            val_scalar_loss = torch.tensor(0.0, device=val_scalar_pred.device)
+            
+        losses['value_scalar'] = val_scalar_loss
+        
+        # 4. Mate Loss (MSE)
         # Target is scalar [-1, 1]. Model output is scalar.
         mate_pred = outputs['mate'] # [B, 1]
         mate_target = batch['mate_target'] # [B, 1]
@@ -66,6 +80,7 @@ class ChessLoss(nn.Module):
         total_loss = (
             self.policy_weight * policy_loss +
             self.value_weight * value_loss +
+            self.value_scalar_weight * val_scalar_loss +
             self.mate_weight * mate_loss
         )
         losses['total'] = total_loss

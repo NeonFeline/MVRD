@@ -2,7 +2,7 @@ import os
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from dataset import FastChessDataset, StreamingShuffleDataset
+from dataset.chess_dataset import FastChessDataset, StreamingShuffleDataset
 from model import ChessTransformer
 from loss import ChessLoss
 import time
@@ -37,38 +37,36 @@ def get_lr_schedule(step, total_steps, base_lr, warmup_pct=0.05, decay_pct=0.15)
     return base_lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 def calculate_topk_accuracy(logits, targets, k=1):
-    # logits: [B, Vocab]
-    # targets: [B, Vocab] (One-hot) -> need indices [B]
     target_indices = torch.argmax(targets, dim=1)
-    
-    # Get top k indices
     _, topk_indices = torch.topk(logits, k, dim=1) # [B, k]
-    
-    # Check if target is in top k
-    # target_indices.unsqueeze(1) -> [B, 1]
-    # topk_indices == target -> [B, k] boolean
-    # Any match in row?
     correct = torch.eq(topk_indices, target_indices.unsqueeze(1)).any(dim=1)
     return correct.float().mean().item()
 
 def train_preview():
     # --- SWAPPABLE CONFIG ---
-    TRAIN_SAMPLES = 1_000
+    TRAIN_SAMPLES = 500
     VAL_SAMPLES = 100
-    SHUFFLE_BUFFER = 1_000
-    EPOCHS = 2
+    SHUFFLE_BUFFER = 500
+    EPOCHS = 10
     BATCH_SIZE = 16
     VAL_INTERVAL_STEPS = 20
     
     CHECKPOINT_INTERVAL = 5000 
-    CHECKPOINT_PATH = "checkpoint_train.pt"
-    RESUME = True
+    CHECKPOINT_PATH = "checkpoint_train_preview.pt"
+    RESUME = False # Set to false for preview run
     
     WARMUP_PCT = 0.05
     DECAY_PCT = 0.15
     # -------------------------
 
-    DATA_PATH = "dataset/data/lichess_db_eval.jsonl.zst"
+    # Path to data - searching for any .zst in dataset/data
+    import glob
+    candidates = glob.glob("dataset/data/*.jsonl.zst")
+    if candidates:
+        DATA_PATH = candidates[0]
+    else:
+        DATA_PATH = "dataset/data/lichess_db_eval.jsonl.zst"
+        
     GRAD_ACCUM = 1
     MUON_LR = 0.02 
     ADAM_LR = 3e-4
@@ -78,19 +76,28 @@ def train_preview():
     print(f"Training on {DEVICE}...")
 
     # --- WandB Init ---
-    wandb.init(project="mvrce-chess", name="train_preview_topk", resume="allow", config={
+    # Running in disabled mode if API key not found for quick preview
+    wandb_mode = "online" if "WANDB_API_KEY" in os.environ else "disabled"
+    wandb.init(project="mvrce-chess", name="train_preview_rel_pos", resume="allow", mode=wandb_mode, config={
         "batch_size": BATCH_SIZE,
         "muon_lr": MUON_LR,
         "train_samples": TRAIN_SAMPLES,
         "epochs": EPOCHS,
-        "schedule": "warmup_steady_cosine"
+        "schedule": "warmup_steady_cosine",
+        "model": "768_24_rel_pos"
     })
     
     steps_per_epoch = math.ceil(TRAIN_SAMPLES / BATCH_SIZE)
     total_steps = steps_per_epoch * EPOCHS
     
     # --- Model & Optim ---
-    model = ChessTransformer(depth=24, embed_dim=512).to(DEVICE)
+    # Matching config.yaml defaults but depth=4 for faster preview
+    model = ChessTransformer(
+        hidden_size=768, 
+        depth=4, 
+        num_heads=12, 
+        num_scratchpad=16
+    ).to(DEVICE)
     
     muon_params = []
     adam_decay = []
@@ -130,7 +137,8 @@ def train_preview():
         'loss': 0.0,
         'acc_1': 0.0,
         'acc_3': 0.0,
-        'acc_5': 0.0
+        'acc_5': 0.0,
+        'value_scalar': 0.0
     }
     
     start_time = time.time()
@@ -145,7 +153,6 @@ def train_preview():
                                     skip=VAL_SAMPLES + samples_to_skip_in_epoch, 
                                     limit=TRAIN_SAMPLES - samples_to_skip_in_epoch)
         ds_train_shuffled = StreamingShuffleDataset(ds_train, buffer_size=SHUFFLE_BUFFER)
-        # Using num_workers=0 for efficiency on single stream
         train_loader = DataLoader(ds_train_shuffled, batch_size=BATCH_SIZE, num_workers=0)
         
         for batch in train_loader:
@@ -155,7 +162,7 @@ def train_preview():
             
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                 outputs = model(batch)
-                loss, _ = criterion(outputs, batch)
+                loss, losses = criterion(outputs, batch)
                 
                 with torch.no_grad():
                     legal_mask = batch['legal_mask']
@@ -170,6 +177,7 @@ def train_preview():
             metrics_acc['acc_1'] += acc1
             metrics_acc['acc_3'] += acc3
             metrics_acc['acc_5'] += acc5
+            metrics_acc['value_scalar'] += losses['value_scalar'].item()
             
             loss.backward()
             
@@ -193,12 +201,13 @@ def train_preview():
                     "train/acc_top1": metrics_acc['acc_1'] / count,
                     "train/acc_top3": metrics_acc['acc_3'] / count,
                     "train/acc_top5": metrics_acc['acc_5'] / count,
+                    "train/value_scalar_loss": metrics_acc['value_scalar'] / count,
                     "lr/muon": lr_m, 
                     "step": step, 
                     "epoch": epoch + 1
                 }
                 wandb.log(log_data)
-                print(f"Ep {epoch+1} | St {step} | Loss: {log_data['train/loss']:.4f} | Acc1: {log_data['train/acc_top1']:.3f}")
+                print(f"Ep {epoch+1} | St {step} | Loss: {log_data['train/loss']:.4f} | Acc1: {log_data['train/acc_top1']:.3f} | ValScal: {log_data['train/value_scalar_loss']:.4f}")
                 
                 # Reset metrics
                 metrics_acc = {k: 0.0 for k in metrics_acc}
@@ -206,7 +215,7 @@ def train_preview():
             # Validation
             if step % VAL_INTERVAL_STEPS == 0 and step > 0:
                 model.eval()
-                v_metrics = {'loss': 0.0, 'acc_1': 0.0, 'acc_3': 0.0, 'acc_5': 0.0}
+                v_metrics = {'loss': 0.0, 'acc_1': 0.0, 'value_scalar': 0.0}
                 v_count = 0
                 val_loader = DataLoader(FastChessDataset(DATA_PATH, skip=0, limit=VAL_SAMPLES), batch_size=BATCH_SIZE)
                 
@@ -215,26 +224,24 @@ def train_preview():
                         v_batch = {k: v.to(DEVICE) for k, v in v_batch.items()}
                         with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                             v_out = model(v_batch)
-                            l, _ = criterion(v_out, v_batch)
+                            l, v_losses = criterion(v_out, v_batch)
                             
                             legal_mask = v_batch['legal_mask']
                             masked_logits = v_out['policy'] + (1.0 - legal_mask) * -1e9
                             
                             v_metrics['acc_1'] += calculate_topk_accuracy(masked_logits, v_batch['move_target'], k=1)
-                            v_metrics['acc_3'] += calculate_topk_accuracy(masked_logits, v_batch['move_target'], k=3)
-                            v_metrics['acc_5'] += calculate_topk_accuracy(masked_logits, v_batch['move_target'], k=5)
                             v_metrics['loss'] += l.item()
+                            v_metrics['value_scalar'] += v_losses['value_scalar'].item()
                             v_count += 1
                             
                 if v_count > 0:
                     wandb.log({
-                        "val/evaluation_loss": v_metrics['loss']/v_count, 
+                        "val/loss": v_metrics['loss']/v_count, 
                         "val/acc_top1": v_metrics['acc_1']/v_count,
-                        "val/acc_top3": v_metrics['acc_3']/v_count,
-                        "val/acc_top5": v_metrics['acc_5']/v_count,
+                        "val/value_scalar_loss": v_metrics['value_scalar']/v_count,
                         "step": step
                     })
-                    print(f"--- Validation --- Loss: {v_metrics['loss']/v_count:.4f} | Top1: {v_metrics['acc_1']/v_count:.3f}")
+                    print(f"--- Validation --- Loss: {v_metrics['loss']/v_count:.4f} | Top1: {v_metrics['acc_1']/v_count:.3f} | ValScal: {v_metrics['value_scalar']/v_count:.4f}")
                 model.train()
 
             step += 1
