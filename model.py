@@ -3,17 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-class RMSNorm(nn.Module):
+class RMSNorm(nn.RMSNorm):
     def __init__(self, dim, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-        self.scale = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        # x: [batch, seq, dim]
-        norm_x = torch.mean(x ** 2, dim=-1, keepdim=True)
-        x_normed = x * torch.rsqrt(norm_x + self.eps)
-        return self.scale * x_normed
+        super().__init__(dim, eps=eps)
 
 class SwiGLU(nn.Module):
     def __init__(self, dim, hidden_dim, bias=False):
@@ -26,13 +18,13 @@ class SwiGLU(nn.Module):
         return self.w2(self.w(x) * F.silu(self.v(x)))
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, ff_dim):
+    def __init__(self, dim, num_heads, ff_dim, seq_len):
         super().__init__()
         self.num_heads = num_heads
         self.norm1 = RMSNorm(dim)
         
         # Layer-specific Relative Positional Bias Parameters
-        # Range: -7 to +7 (15 indices) per head
+        self.seq_bias_emb = nn.Parameter(torch.zeros(num_heads, seq_len, seq_len))
         self.rel_rank_embed = nn.Parameter(torch.randn(15, num_heads) * 0.02)
         self.rel_file_embed = nn.Parameter(torch.randn(15, num_heads) * 0.02)
         
@@ -53,11 +45,13 @@ class TransformerBlock(nn.Module):
         
         # Construct Full Mask
         B, seq_len, _ = x.shape
-        attn_bias = torch.zeros(self.num_heads, seq_len, seq_len, device=x.device, dtype=x.dtype)
         start_idx = seq_len - 64
         
-        # Fill board bias
-        attn_bias[:, start_idx:, start_idx:] = board_bias
+        # Pad board bias to match [H, seq_len, seq_len]
+        padded_board_bias = F.pad(board_bias, (start_idx, 0, start_idx, 0), "constant", 0.0)
+        
+        # Combine learned base bias with board bias
+        attn_bias = self.seq_bias_emb + padded_board_bias
         
         # Expand for Batch: [B*H, Seq, Seq]
         # This materialization might be costly if B is huge, but necessary for MHA API.
@@ -113,9 +107,13 @@ class ChessTransformer(nn.Module):
         self.scratchpad = nn.Parameter(torch.randn(1, num_scratchpad, hidden_size) * 0.02)
         self.output_token = nn.Parameter(torch.randn(1, 1, hidden_size) * 0.02)
         
+        # Sequence Length Calculation
+        # 1 output + 1 turn + 4 cast + 1 ep + 2 count + num_scratchpad + 64 board
+        seq_len = 9 + num_scratchpad + 64
+        
         # --- Transformer Encoder ---
         self.layers = nn.ModuleList([
-            TransformerBlock(hidden_size, num_heads, ff_dim)
+            TransformerBlock(hidden_size, num_heads, ff_dim, seq_len=seq_len)
             for _ in range(depth)
         ])
         

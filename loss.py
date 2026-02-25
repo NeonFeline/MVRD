@@ -33,8 +33,7 @@ class ChessLoss(nn.Module):
         
         # Apply Mask: Set illegal moves to -inf
         # legal_mask is 1.0 for legal, 0.0 for illegal.
-        # (1 - legal_mask) * -1e9 -> 0 for legal, -big for illegal
-        masked_logits = policy_logits + (1.0 - legal_mask) * -1e9
+        masked_logits = policy_logits.masked_fill(legal_mask == 0.0, float('-inf'))
         
         # Target is one-hot, so we use indices for CrossEntropy or direct softmax
         # Since target is one-hot, easiest is: - sum(target * log_softmax(logits))

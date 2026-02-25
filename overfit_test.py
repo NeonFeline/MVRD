@@ -16,6 +16,7 @@ def train_small_subset():
     GRAD_ACCUM = 1  # Effective Batch Size = 16
     MUON_LR = 0.02  
     ADAM_LR = 3e-4
+    ADAM_WEIGHT_DECAY = 0.01
     MAX_GRAD_NORM = 1.0 # Standard threshold for clipping
     EPOCHS = 1
     MAX_STEPS = 500 
@@ -49,12 +50,13 @@ def train_small_subset():
     adam_no_decay = []
 
     for name, p in model.named_parameters():
-        if p.ndim == 2 and "embed" not in name and "head" not in name:
-            muon_params.append(p)
-        elif p.ndim >= 2:
-            adam_decay.append(p)
-        else:
+        is_embedding = any(kw in name for kw in ["embed", "emb", "scratchpad", "token", "query"])
+        if p.ndim < 2 or is_embedding:
             adam_no_decay.append(p)
+        elif p.ndim == 2 and "head" not in name:
+            muon_params.append(p)
+        else:
+            adam_decay.append(p)
 
     # Initialize Official PyTorch Muon with decreased epsilon
     optimizer_muon = optim.Muon(
@@ -67,7 +69,7 @@ def train_small_subset():
 
     # Initialize AdamW
     optimizer_adam = optim.AdamW([
-        {'params': adam_decay, 'weight_decay': 0.01},
+        {'params': adam_decay, 'weight_decay': ADAM_WEIGHT_DECAY},
         {'params': adam_no_decay, 'weight_decay': 0.0}
     ], lr=ADAM_LR)
     
@@ -128,8 +130,8 @@ def train_small_subset():
             with torch.no_grad():
                 # Apply Legal Mask (Same as in Loss)
                 legal_mask = batch['legal_mask']
-                masked_logits = outputs['policy'] + (1.0 - legal_mask) * -1e9
-                
+                masked_logits = outputs['policy'].masked_fill(legal_mask == 0.0, float('-inf'))
+
                 pred_moves = torch.argmax(masked_logits, dim=1)
                 target_moves = torch.argmax(batch['move_target'], dim=1)
                 accuracy = (pred_moves == target_moves).float().mean()

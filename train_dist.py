@@ -147,16 +147,19 @@ def train(config):
     
     for name, p in model.named_parameters():
         if not p.requires_grad: continue
-        if p.ndim == 2 and "embed" not in name and "head" not in name:
-            muon_params.append(p)
-        elif p.ndim >= 2:
-            adam_decay.append(p)
-        else:
+        
+        is_embedding = any(kw in name for kw in ["embed", "emb", "scratchpad", "token", "query"])
+        
+        if p.ndim < 2 or is_embedding:
             adam_no_decay.append(p)
+        elif p.ndim == 2 and "head" not in name:
+            muon_params.append(p)
+        else:
+            adam_decay.append(p)
             
     optimizer_muon = optim.Muon(muon_params, lr=train_cfg['muon_learning_rate'], weight_decay=train_cfg['muon_weight_decay'], momentum=0.95)
     optimizer_adam = optim.AdamW([
-        {'params': adam_decay, 'weight_decay': train_cfg['weight_decay']},
+        {'params': adam_decay, 'weight_decay': train_cfg['adam_weight_decay']},
         {'params': adam_no_decay, 'weight_decay': 0.0}
     ], lr=train_cfg['adam_learning_rate'])
 
@@ -209,7 +212,7 @@ def train(config):
                 # Accumulate Stats (Every Step)
                 with torch.no_grad():
                     legal_mask = batch['legal_mask']
-                    masked_logits = outputs['policy'] + (1.0 - legal_mask) * -1e9
+                    masked_logits = outputs['policy'].masked_fill(legal_mask == 0.0, float('-inf'))
                     acc1 = calculate_topk_accuracy(masked_logits, batch['move_target'], k=1)
                     acc3 = calculate_topk_accuracy(masked_logits, batch['move_target'], k=3)
                     acc5 = calculate_topk_accuracy(masked_logits, batch['move_target'], k=5)
@@ -281,7 +284,7 @@ def train(config):
                             val_loss, val_losses = criterion(val_outputs, val_batch)
                             
                             legal_mask = val_batch['legal_mask']
-                            masked_logits = val_outputs['policy'] + (1.0 - legal_mask) * -1e9
+                            masked_logits = val_outputs['policy'].masked_fill(legal_mask == 0.0, float('-inf'))
                             val_acc1 = calculate_topk_accuracy(masked_logits, val_batch['move_target'], k=1)
                         
                         val_metrics['loss'] += val_loss.item()

@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=mvrd-train
 #SBATCH --partition=hgx
-#SBATCH --nodelist=hgx1
+#SBATCH --nodelist=hgx2
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=8
-#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=6
+#SBATCH --ntasks-per-node=6
 #SBATCH --cpus-per-task=16
-#SBATCH --time=140:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
@@ -43,4 +43,4 @@ uv run torchrun \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     train_dist.py \
-    --config config.yaml
+    --config configs/config_0_scratchpads.yaml
