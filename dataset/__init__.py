@@ -1,3 +1,3 @@
-from .chess_dataset import FastChessDataset, ChessMoveTokenizer, StreamingShuffleDataset
+from .chess_dataset import FastChessDataset, ChessMoveTokenizer
 
-__all__ = ["FastChessDataset", "ChessMoveTokenizer", "StreamingShuffleDataset"]
+__all__ = ["FastChessDataset", "ChessMoveTokenizer"]

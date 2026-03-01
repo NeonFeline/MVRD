@@ -14,8 +14,22 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import wandb
 
 from model import ChessTransformer
-from dataset.chess_dataset import FastChessDataset, StreamingShuffleDataset
+from dataset.chess_dataset import FastChessDataset
 from loss import ChessLoss
+
+def find_latest_checkpoint(save_dir):
+    """Return the path to the checkpoint with the highest step number, or None."""
+    if not os.path.exists(save_dir):
+        return None
+    ckpts = glob.glob(os.path.join(save_dir, "checkpoint_*.pt"))
+    if not ckpts:
+        return None
+    def get_step(path):
+        try:
+            return int(os.path.basename(path).replace("checkpoint_", "").replace(".pt", ""))
+        except ValueError:
+            return -1
+    return max(ckpts, key=get_step)
 
 def setup():
     dist.init_process_group(backend="nccl")
@@ -60,17 +74,6 @@ def train(config):
     np.random.seed(seed)
     random.seed(seed)
 
-    # Logging
-    if rank == 0:
-        if not os.path.exists(train_cfg['save_dir']):
-            os.makedirs(train_cfg['save_dir'], exist_ok=True)
-        # Check for wandb API key or login
-        if "WANDB_API_KEY" in os.environ:
-             wandb.init(project=train_cfg['project'], name=train_cfg['run_name'], config=config)
-        else:
-             print("WANDB_API_KEY not found. WandB logging might fail or run in offline mode.")
-             wandb.init(project=train_cfg['project'], name=train_cfg['run_name'], config=config, mode="disabled")
-
     # Data Finding
     data_path = train_cfg['data_path']
     if os.path.isdir(data_path):
@@ -82,46 +85,53 @@ def train(config):
             if rank == 0: print(f"Warning: No .jsonl.zst found in {data_path}. Ensure data exists.")
 
     # Dataset
+    wanted_global_batch_size = train_cfg.get('wanted_global_batch_size', 4096)
+    max_local_batch_size = train_cfg.get('max_local_batch_size', 512)
+
+    target_per_gpu = wanted_global_batch_size / world_size
+
+    if target_per_gpu <= max_local_batch_size:
+        grad_accum_steps = 1
+        local_batch_size = int(target_per_gpu)
+    else:
+        grad_accum_steps = math.ceil(target_per_gpu / max_local_batch_size)
+        local_batch_size = int(target_per_gpu / grad_accum_steps)
+
+    actual_global_batch_size = local_batch_size * world_size * grad_accum_steps
+
     # Split: First 50k for validation, rest for training
     val_samples_per_rank = 50000 // world_size
-    
-    # Validation Dataset (First 50k)
+
     val_dataset = FastChessDataset(
-        data_path,
-        rank=rank,
-        world_size=world_size,
-        limit=val_samples_per_rank,
-        skip=0
+        data_path, rank=rank, world_size=world_size,
+        limit=val_samples_per_rank, skip=0
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=train_cfg['local_batch_size'],
+        batch_size=local_batch_size,
         num_workers=train_cfg['workers'],
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=True
     )
-    
-    # Training Dataset (Rest)
+
     train_dataset = FastChessDataset(
-        data_path, 
-        rank=rank, 
-        world_size=world_size,
-        skip=val_samples_per_rank # Skip the validation chunk
+        data_path, rank=rank, world_size=world_size,
+        skip=val_samples_per_rank
     )
-    train_dataset = StreamingShuffleDataset(train_dataset, buffer_size=train_cfg['buffer_size'])
-    
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=train_cfg['local_batch_size'], 
-        num_workers=train_cfg['workers'], 
-        pin_memory=True
+        train_dataset,
+        batch_size=local_batch_size,
+        num_workers=train_cfg['workers'],
+        pin_memory=True,
+        persistent_workers=True
     )
-    
+
     # Helper for infinite validation stream
     def cycle(loader):
         while True:
             for batch in loader:
                 yield batch
-    
+
     val_iterator = cycle(val_loader)
 
     # Model
@@ -165,35 +175,111 @@ def train(config):
 
     criterion = ChessLoss()
 
-    step = 0
-    model.train()
-    
     # Calculate total steps for scheduler
     val_count = 50000
     train_count = train_cfg['dataset_size'] - val_count
     if train_count <= 0:
         raise ValueError(f"Dataset length {train_cfg['dataset_size']} is too small for validation set of {val_count}")
 
-    global_batch_size = train_cfg['local_batch_size'] * world_size
+    global_batch_size = actual_global_batch_size
     steps_per_epoch = train_count // global_batch_size
     total_steps = train_cfg['epochs'] * steps_per_epoch
-    
-    if rank == 0: 
-        print(f"Starting training for {train_cfg['epochs']} epochs.")
-        print(f"Global Batch Size: {global_batch_size} ({train_cfg['local_batch_size']} per GPU * {world_size} GPUs)")
+
+    # --- Checkpoint Resume ---
+    step = 0
+    start_epoch = 0
+    wandb_run_id = None
+
+    save_dir = train_cfg['save_dir']
+    ckpt_file = find_latest_checkpoint(save_dir)
+    if ckpt_file is not None:
+        if rank == 0:
+            print(f"Resuming from checkpoint: {ckpt_file}")
+        ckpt = torch.load(ckpt_file, map_location=device, weights_only=False)
+        model.module.load_state_dict(ckpt['model'])
+        optimizer_muon.load_state_dict(ckpt['optimizer_muon'])
+        optimizer_adam.load_state_dict(ckpt['optimizer_adam'])
+        step = ckpt['step']
+        start_epoch = ckpt['epoch']
+        wandb_run_id = ckpt.get('wandb_run_id')
+        if rank == 0:
+            print(f"Resumed at step {step}, epoch {start_epoch + 1}")
+
+    # Logging (after checkpoint load so we have the wandb run id)
+    if rank == 0:
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        wandb_kwargs = dict(project=train_cfg['project'], name=train_cfg['run_name'], config=config)
+        if wandb_run_id:
+            wandb_kwargs['id'] = wandb_run_id
+            wandb_kwargs['resume'] = "must"
+        if "WANDB_API_KEY" in os.environ:
+            wandb.init(**wandb_kwargs)
+        else:
+            print("WANDB_API_KEY not found. WandB logging might fail or run in offline mode.")
+            wandb.init(**wandb_kwargs, mode="disabled")
+
+    model.train()
+
+    if rank == 0:
+        print(f"{'Resuming' if step > 0 else 'Starting'} training for {train_cfg['epochs']} epochs.")
+        print(f"Global Batch Size: {global_batch_size} ({local_batch_size} per GPU * {world_size} GPUs * {grad_accum_steps} grad accum steps)")
         print(f"Training samples: {train_count} | Steps per epoch: {steps_per_epoch}")
         print(f"Scheduler set for {total_steps} total steps.")
     
     # Metrics accumulator
     metrics_acc = {'loss': 0.0, 'acc_1': 0.0, 'acc_3': 0.0, 'acc_5': 0.0}
     
-    for epoch in range(train_cfg['epochs']):
+    for epoch in range(start_epoch, train_cfg['epochs']):
         if rank == 0: print(f"--- Epoch {epoch+1}/{train_cfg['epochs']} ---")
-        
-        for batch in train_loader:
+
+        steps_to_skip = (step - epoch * steps_per_epoch) if epoch == start_epoch else 0
+        start_per_worker = steps_to_skip * local_batch_size * grad_accum_steps // train_cfg['workers']
+        if steps_to_skip > 0 and rank == 0:
+            print(f"Fast-forwarding past {steps_to_skip} steps (~{start_per_worker} samples/worker)...")
+        # train_dataset.set_epoch(epoch, start_per_worker)
+
+        optimizer_muon.zero_grad()
+        optimizer_adam.zero_grad()
+
+        for batch_idx, batch in enumerate(train_loader):
             # Move to device
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             
+            import contextlib
+            is_accumulating = (batch_idx + 1) % grad_accum_steps != 0
+            sync_context = model.no_sync() if is_accumulating else contextlib.nullcontext()
+
+            with sync_context:
+                # Mixed Precision Forward
+                with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    outputs = model(batch)
+                    loss, losses = criterion(outputs, batch)
+                    loss = loss / grad_accum_steps
+
+                    # Accumulate Stats (Every Step)
+                    with torch.no_grad():
+                        legal_mask = batch['legal_mask']
+                        masked_logits = outputs['policy'].masked_fill(legal_mask == 0.0, float('-inf'))
+                        acc1 = calculate_topk_accuracy(masked_logits, batch['move_target'], k=1)
+                        acc3 = calculate_topk_accuracy(masked_logits, batch['move_target'], k=3)
+                        acc5 = calculate_topk_accuracy(masked_logits, batch['move_target'], k=5)
+
+                        metrics_acc['loss'] += loss.item()
+                        metrics_acc['acc_1'] += acc1 / grad_accum_steps
+                        metrics_acc['acc_3'] += acc3 / grad_accum_steps
+                        metrics_acc['acc_5'] += acc5 / grad_accum_steps
+
+                        for k, v in losses.items():
+                            if k not in metrics_acc: metrics_acc[k] = 0.0
+                            metrics_acc[k] += (v.item() / grad_accum_steps)
+
+                loss.backward()
+
+            if is_accumulating:
+                continue
+
+            torch.nn.utils.clip_grad_norm_(adam_decay + adam_no_decay, 1.0)            
             # Calculate Learning Rates
             lr_m = get_lr_schedule(step, total_steps, train_cfg['muon_learning_rate'], train_cfg['warmup_percentage'], train_cfg['decay_percentage'])
             lr_a = get_lr_schedule(step, total_steps, train_cfg['adam_learning_rate'], train_cfg['warmup_percentage'], train_cfg['decay_percentage'])
@@ -201,36 +287,11 @@ def train(config):
             for pg in optimizer_muon.param_groups: pg['lr'] = lr_m
             for pg in optimizer_adam.param_groups: pg['lr'] = lr_a
             
-            optimizer_muon.zero_grad()
-            optimizer_adam.zero_grad()
-            
-            # Mixed Precision Forward
-            with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
-                outputs = model(batch)
-                loss, losses = criterion(outputs, batch)
-                
-                # Accumulate Stats (Every Step)
-                with torch.no_grad():
-                    legal_mask = batch['legal_mask']
-                    masked_logits = outputs['policy'].masked_fill(legal_mask == 0.0, float('-inf'))
-                    acc1 = calculate_topk_accuracy(masked_logits, batch['move_target'], k=1)
-                    acc3 = calculate_topk_accuracy(masked_logits, batch['move_target'], k=3)
-                    acc5 = calculate_topk_accuracy(masked_logits, batch['move_target'], k=5)
-                    
-                    metrics_acc['loss'] += loss.item()
-                    metrics_acc['acc_1'] += acc1
-                    metrics_acc['acc_3'] += acc3
-                    metrics_acc['acc_5'] += acc5
-                    
-                    for k, v in losses.items():
-                        if k not in metrics_acc: metrics_acc[k] = 0.0
-                        metrics_acc[k] += v.item()
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
             optimizer_muon.step()
             optimizer_adam.step()
+            
+            optimizer_muon.zero_grad()
+            optimizer_adam.zero_grad()
             
             step += 1
             
@@ -258,7 +319,7 @@ def train(config):
                     print(f"Ep {epoch+1} | Step {step}: Loss {log_dict['train/loss']:.4f} | Acc1 {log_dict['train/acc_top1']:.3f}")
                     
                     if wandb.run:
-                        wandb.log(log_dict)
+                        wandb.log(log_dict, step=step)
 
                     # Reset
                     metrics_acc = {'loss': 0.0, 'acc_1': 0.0, 'acc_3': 0.0, 'acc_5': 0.0}
@@ -309,19 +370,31 @@ def train(config):
                             "val/value_scalar_loss": val_metrics['value_scalar_loss'],
                             "val/mate_loss": val_metrics['mate_loss'],
                             "step": step
-                        })
+                        }, step=step)
                 
                 model.train()
 
             if rank == 0 and step % train_cfg['save_interval'] == 0:
-                ckpt_path = os.path.join(train_cfg['save_dir'], f"checkpoint_{step}.pt")
-                torch.save(model.module.state_dict(), ckpt_path)
+                ckpt_path = os.path.join(save_dir, f"checkpoint_{step}.pt")
+                tmp_path = ckpt_path + ".tmp"
+                torch.save({
+                    'model': model.module.state_dict(),
+                    'optimizer_muon': optimizer_muon.state_dict(),
+                    'optimizer_adam': optimizer_adam.state_dict(),
+                    'step': step,
+                    'epoch': epoch,
+                    'wandb_run_id': wandb.run.id if wandb.run else None,
+                }, tmp_path)
+                os.replace(tmp_path, ckpt_path)
 
     if rank == 0:
-        torch.save(model.module.state_dict(), os.path.join(train_cfg['save_dir'], "final.pt"))
+        torch.save(model.module.state_dict(), os.path.join(save_dir, "final.pt"))
         if wandb.run:
             wandb.finish()
 
+    dist.barrier()
+    # train_dataset.cleanup()
+    # val_dataset.cleanup()
     cleanup()
 
 if __name__ == "__main__":

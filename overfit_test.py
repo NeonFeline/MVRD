@@ -150,7 +150,7 @@ def train_small_subset():
         # Step
         if (i + 1) % GRAD_ACCUM == 0:
             # --- Gradient Clipping ---
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)
+            torch.nn.utils.clip_grad_norm_(adam_decay + adam_no_decay, max_norm=MAX_GRAD_NORM)
 
             # Linear Warmup
             step += 1

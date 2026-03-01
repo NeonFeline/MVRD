@@ -1,7 +1,10 @@
 import orjson
 import os
+import mmap
+import uuid
 import zstandard as zstd
 import io
+import random
 import torch
 import numpy as np
 import chess
@@ -244,45 +247,3 @@ class FastChessDataset(IterableDataset):
                     
                     count += 1
 
-import random
-
-class StreamingShuffleDataset(IterableDataset):
-    def __init__(self, dataset, buffer_size=10000):
-        self.dataset = dataset
-        self.buffer_size = buffer_size
-
-    def __iter__(self):
-        buffer = []
-        for item in self.dataset:
-            if len(buffer) < self.buffer_size:
-                buffer.append(item)
-            else:
-                idx = random.randint(0, len(buffer) - 1)
-                yield buffer[idx]
-                buffer[idx] = item
-        
-        # Yield remaining buffer
-        random.shuffle(buffer)
-        for item in buffer:
-            yield item
-
-if __name__ == "__main__":
-    # Test run
-    import sys
-    if len(sys.argv) > 1:
-        path = sys.argv[1]
-        # Test basic
-        ds = FastChessDataset(path)
-        print(f"Iterating {path}...")
-        for i, item in enumerate(ds):
-            if i == 0:
-                print("First item keys:", item.keys())
-                print("Board shape:", item['board'].shape)
-            if i >= 5: break
-            
-        # Test shuffle
-        print("Testing Shuffle Wrapper...")
-        ds_shuffled = StreamingShuffleDataset(FastChessDataset(path, limit=20), buffer_size=5)
-        for i, item in enumerate(ds_shuffled):
-            pass # Just ensure it runs
-        print("Shuffle test passed.")

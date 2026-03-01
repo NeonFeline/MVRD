@@ -2,7 +2,7 @@ import os
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from dataset.chess_dataset import FastChessDataset, StreamingShuffleDataset
+from dataset.chess_dataset import FastChessDataset
 from model import ChessTransformer
 from loss import ChessLoss
 import time
@@ -156,8 +156,7 @@ def train_preview():
         ds_train = FastChessDataset(DATA_PATH, 
                                     skip=VAL_SAMPLES + samples_to_skip_in_epoch, 
                                     limit=TRAIN_SAMPLES - samples_to_skip_in_epoch)
-        ds_train_shuffled = StreamingShuffleDataset(ds_train, buffer_size=SHUFFLE_BUFFER)
-        train_loader = DataLoader(ds_train_shuffled, batch_size=BATCH_SIZE, num_workers=0)
+        train_loader = DataLoader(ds_train, batch_size=BATCH_SIZE, num_workers=0)
         
         for batch in train_loader:
             if step >= total_steps: break
@@ -185,7 +184,7 @@ def train_preview():
             
             loss.backward()
             
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)
+            torch.nn.utils.clip_grad_norm_(adam_decay + adam_no_decay, max_norm=MAX_GRAD_NORM)
             
             lr_m = get_lr_schedule(step, total_steps, MUON_LR, WARMUP_PCT, DECAY_PCT)
             lr_a = get_lr_schedule(step, total_steps, ADAM_LR, WARMUP_PCT, DECAY_PCT)
@@ -206,12 +205,11 @@ def train_preview():
                     "train/acc_top3": metrics_acc['acc_3'] / count,
                     "train/acc_top5": metrics_acc['acc_5'] / count,
                     "train/value_scalar_loss": metrics_acc['value_scalar'] / count,
-                    "lr/muon": lr_m, 
-                    "step": step, 
+                    "lr/muon": lr_m,
+                    "step": step,
                     "epoch": epoch + 1
                 }
-                wandb.log(log_data)
-                print(f"Ep {epoch+1} | St {step} | Loss: {log_data['train/loss']:.4f} | Acc1: {log_data['train/acc_top1']:.3f} | ValScal: {log_data['train/value_scalar_loss']:.4f}")
+                wandb.log(log_data, step=step)                print(f"Ep {epoch+1} | St {step} | Loss: {log_data['train/loss']:.4f} | Acc1: {log_data['train/acc_top1']:.3f} | ValScal: {log_data['train/value_scalar_loss']:.4f}")
                 
                 # Reset metrics
                 metrics_acc = {k: 0.0 for k in metrics_acc}
@@ -240,12 +238,11 @@ def train_preview():
                             
                 if v_count > 0:
                     wandb.log({
-                        "val/loss": v_metrics['loss']/v_count, 
+                        "val/loss": v_metrics['loss']/v_count,
                         "val/acc_top1": v_metrics['acc_1']/v_count,
                         "val/value_scalar_loss": v_metrics['value_scalar']/v_count,
                         "step": step
-                    })
-                    print(f"--- Validation --- Loss: {v_metrics['loss']/v_count:.4f} | Top1: {v_metrics['acc_1']/v_count:.3f} | ValScal: {v_metrics['value_scalar']/v_count:.4f}")
+                    }, step=step)                    print(f"--- Validation --- Loss: {v_metrics['loss']/v_count:.4f} | Top1: {v_metrics['acc_1']/v_count:.3f} | ValScal: {v_metrics['value_scalar']/v_count:.4f}")
                 model.train()
 
             step += 1

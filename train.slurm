@@ -3,10 +3,10 @@
 #SBATCH --partition=hgx
 #SBATCH --nodelist=hgx2
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=6
-#SBATCH --ntasks-per-node=6
+#SBATCH --gpus-per-node=5
+#SBATCH --ntasks-per-node=5
 #SBATCH --cpus-per-task=16
-#SBATCH --time=48:00:00
+#SBATCH --time=96:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 

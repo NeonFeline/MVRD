@@ -14,7 +14,8 @@ training:
   muon_weight_decay: 0.1
   warmup_percentage: 0.05
   decay_percentage: 0.80
-  local_batch_size: 512
+  wanted_global_batch_size: 4096
+  max_local_batch_size: 512
   epochs: 2
   dataset_size: 342059879
   log_interval: 10
