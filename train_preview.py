@@ -165,7 +165,11 @@ def train_preview():
             
             with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                 outputs = model(batch)
-                loss, losses = criterion(outputs, batch)
+                
+                # Anneal auxiliary distillation loss multiplier from 1.0 to 0.1
+                # If total_steps is 0 (shouldn't happen), default to 1.0
+                aux_multiplier = max(0.1, 1.0 - (step / total_steps)) if total_steps > 0 else 1.0
+                loss, losses = criterion(outputs, batch, aux_multiplier=aux_multiplier)
                 
                 with torch.no_grad():
                     legal_mask = batch['legal_mask']
@@ -226,7 +230,8 @@ def train_preview():
                         v_batch = {k: v.to(DEVICE) for k, v in v_batch.items()}
                         with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                             v_out = model(v_batch)
-                            l, v_losses = criterion(v_out, v_batch)
+                            # Use aux_multiplier=0.0 during validation to focus on primary task performance
+                            l, v_losses = criterion(v_out, v_batch, aux_multiplier=0.0)
                             
                             legal_mask = v_batch['legal_mask']
                             masked_logits = v_out['policy'].masked_fill(legal_mask == 0.0, float('-inf'))

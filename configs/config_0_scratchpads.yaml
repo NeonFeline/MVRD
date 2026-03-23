@@ -6,6 +6,7 @@ model:
   vocab_size: 4544
   num_eval_bins: 128
   num_scratchpad: 0
+  drop_path_rate: 0.1
 
 training:
   adam_learning_rate: 3.0e-4
@@ -27,3 +28,9 @@ training:
   run_name: "run_A100x8_muon_768_24_24_0_relative_attention"
   save_dir: "checkpoints/run_A100x8_muon_768_24_24_0_relative_attention"
   data_path: "dataset/data"
+  loss:
+    policy_weight: 1.0
+    value_weight: 1.0
+    value_scalar_weight: 0.5
+    mate_weight: 0.5
+    temperature: 2.0

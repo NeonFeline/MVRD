@@ -142,7 +142,10 @@ def train(config):
         num_heads=model_cfg['num_heads'],
         ff_dim=model_cfg['ff_dim'],
         num_eval_bins=model_cfg['num_eval_bins'],
-        num_scratchpad=model_cfg['num_scratchpad']
+        num_scratchpad=model_cfg['num_scratchpad'],
+        aux_loss_only_extra_tokens=model_cfg.get('aux_loss_only_extra_tokens', False),
+        use_aux_loss=model_cfg.get('use_aux_loss', True),
+        drop_path_rate=model_cfg.get('drop_path_rate', 0.1)
     ).to(device)
 
     if rank == 0:
@@ -167,13 +170,23 @@ def train(config):
         else:
             adam_decay.append(p)
             
+    # Note: Muon is often provided as an external library or custom implementation
+    # Ensuring optimizer init uses config values
     optimizer_muon = optim.Muon(muon_params, lr=train_cfg['muon_learning_rate'], weight_decay=train_cfg['muon_weight_decay'], momentum=0.95)
     optimizer_adam = optim.AdamW([
         {'params': adam_decay, 'weight_decay': train_cfg['adam_weight_decay']},
         {'params': adam_no_decay, 'weight_decay': 0.0}
     ], lr=train_cfg['adam_learning_rate'])
 
-    criterion = ChessLoss()
+    # Initialize loss with weights from config
+    loss_cfg = train_cfg.get('loss', {})
+    criterion = ChessLoss(
+        policy_weight=loss_cfg.get('policy_weight', 1.0),
+        value_weight=loss_cfg.get('value_weight', 1.0),
+        value_scalar_weight=loss_cfg.get('value_scalar_weight', 1.0),
+        mate_weight=loss_cfg.get('mate_weight', 1.0),
+        temperature=loss_cfg.get('temperature', 2.0)
+    )
 
     # Calculate total steps for scheduler
     val_count = 50000
@@ -254,7 +267,10 @@ def train(config):
                 # Mixed Precision Forward
                 with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                     outputs = model(batch)
-                    loss, losses = criterion(outputs, batch)
+                    
+                    # Anneal auxiliary distillation loss multiplier from 1.0 to 0.1
+                    aux_multiplier = max(0.1, 1.0 - (step / total_steps))
+                    loss, losses = criterion(outputs, batch, aux_multiplier=aux_multiplier)
                     loss = loss / grad_accum_steps
 
                     # Accumulate Stats (Every Step)
@@ -271,8 +287,11 @@ def train(config):
                         metrics_acc['acc_5'] += acc5 / grad_accum_steps
 
                         for k, v in losses.items():
+                            val = v.item()
+                            if math.isnan(val):
+                                continue
                             if k not in metrics_acc: metrics_acc[k] = 0.0
-                            metrics_acc[k] += (v.item() / grad_accum_steps)
+                            metrics_acc[k] += (val / grad_accum_steps)
 
                 loss.backward()
 
@@ -342,7 +361,8 @@ def train(config):
                         
                         with torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16):
                             val_outputs = model(val_batch)
-                            val_loss, val_losses = criterion(val_outputs, val_batch)
+                            # Use aux_multiplier=0.0 during validation to focus on primary task performance
+                            val_loss, val_losses = criterion(val_outputs, val_batch, aux_multiplier=0.0)
                             
                             legal_mask = val_batch['legal_mask']
                             masked_logits = val_outputs['policy'].masked_fill(legal_mask == 0.0, float('-inf'))

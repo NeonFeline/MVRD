@@ -3,10 +3,10 @@
 #SBATCH --partition=hgx
 #SBATCH --nodelist=hgx2
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=5
-#SBATCH --ntasks-per-node=5
+#SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=16
-#SBATCH --time=96:00:00
+#SBATCH --time=128:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
@@ -23,14 +23,13 @@ export LOCAL_RANK=$SLURM_LOCALID
 export WORLD_SIZE=$SLURM_NTASKS
 export RANK=$SLURM_PROCID
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
-export MASTER_PORT=29500
+export MASTER_PORT=$((29000 + RANDOM % 1000))
 
 export NCCL_DEBUG=INFO
 export NCCL_ASYNC_ERROR_HANDLING=1
 
 export NCCL_P2P_LEVEL=NVL
 export NCCL_IB_DISABLE=1
-export NCCL_SOCKET_IFNAME=lo
 
 
 
@@ -43,4 +42,4 @@ uv run torchrun \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     train_dist.py \
-    --config configs/config_0_scratchpads.yaml
+    --config configs/config_small_no_aux.yaml

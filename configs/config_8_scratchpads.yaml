@@ -6,6 +6,7 @@ model:
   vocab_size: 4544
   num_eval_bins: 128
   num_scratchpad: 8
+  drop_path_rate: 0.1
 
 training:
   adam_learning_rate: 3.0e-4
@@ -15,7 +16,7 @@ training:
   warmup_percentage: 0.05
   decay_percentage: 0.80
   wanted_global_batch_size: 4096
-  max_local_batch_size: 512
+  max_local_batch_size: 820
   epochs: 2
   dataset_size: 342059879
   log_interval: 10
@@ -24,6 +25,12 @@ training:
   buffer_size: 100000
   seed: 42
   project: "mvrd-chess"
-  run_name: "run_A100x8_muon_768_24_24_8_relative_attention"
-  save_dir: "checkpoints/run_A100x8_muon_768_24_24_8_relative_attention"
+  run_name: "run_A100x8_muon_768_24_24_8_relative_attention_8_scratchpads"
+  save_dir: "checkpoints/run_A100x8_muon_768_24_24_8_relative_attention_8_scratchpads"
   data_path: "dataset/data"
+  loss:
+    policy_weight: 1.0
+    value_weight: 1.0
+    value_scalar_weight: 0.5
+    mate_weight: 0.5
+    temperature: 2.0
