@@ -1,0 +1,24 @@
+================================================================================
+MVRD Chess Transformer – Interpretability Report
+================================================================================
+
+Model:  hidden=768  depth=24  heads=24  scratchpad=128
+Total extra tokens: 137  (9 fixed + 128 scratchpad)
+Sequence length: 201
+
+Token layout:
+  [0]       Output token           (learnable)
+  [1]       Turn token              (embedding of side to move)
+  [2-5]     Castling tokens          (WK, WQ, BK, BQ)
+  [6]       En-passant token         (embedding of EP square)
+  [7-8]     Counter tokens           (halfmove clock, fullmove number)
+  [9-136]   Scratchpad tokens       (128x learnable)
+  [137-200]  Board tokens            (64 squares)
+
+Architecture notes:
+  - Policy head attends to ALL tokens (extra + board)
+  - Value head ONLY attends to extra tokens (bottleneck design)
+  - Relative position bias between board squares only
+
+See plots and console output for detailed findings.
+================================================================================

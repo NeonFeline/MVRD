@@ -3,9 +3,9 @@
 #SBATCH --partition=hgx
 #SBATCH --nodelist=hgx2
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
-#SBATCH --ntasks-per-node=4
-#SBATCH --cpus-per-task=16
+#SBATCH --gpus-per-node=3
+#SBATCH --ntasks-per-node=3
+#SBATCH --cpus-per-task=8
 #SBATCH --time=128:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
@@ -42,4 +42,4 @@ uv run torchrun \
     --rdzv_backend=c10d \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     train_dist.py \
-    --config configs/config_small_no_aux.yaml
+    --config configs/config_small_no_scratchpad.yaml

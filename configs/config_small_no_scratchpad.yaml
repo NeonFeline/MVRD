@@ -1,0 +1,38 @@
+model:
+  hidden_size: 384
+  depth: 8
+  num_heads: 12
+  ff_dim: 1024
+  vocab_size: 4544
+  num_eval_bins: 128
+  num_scratchpad: 0
+  use_aux_loss: false
+  aux_loss_only_extra_tokens: false
+  drop_path_rate: 0.1
+
+training:
+  adam_learning_rate: 3.0e-4
+  adam_weight_decay: 0.01
+  muon_learning_rate: 0.02
+  muon_weight_decay: 0.1
+  warmup_percentage: 0.05
+  decay_percentage: 0.80
+  wanted_global_batch_size: 4096
+  max_local_batch_size: 1800
+  epochs: 1
+  dataset_size: 342059879
+  log_interval: 10
+  save_interval: 2000
+  workers: 8
+  buffer_size: 100000
+  seed: 42
+  project: "mvrd-chess-tests"
+  run_name: "test_8L_384H_no_scratchpad"
+  save_dir: "checkpoints/test_8L_384H_no_scratchpad"
+  data_path: "dataset/data"
+  loss:
+    policy_weight: 1.0
+    value_weight: 1.0
+    value_scalar_weight: 0.5
+    mate_weight: 0.5
+    temperature: 2.0
